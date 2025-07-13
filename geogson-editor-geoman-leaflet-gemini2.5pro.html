@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leaflet Geoman 高级剪切与选择性导出</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+     integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+     crossorigin=""/>
+
+    <!-- Leaflet-Geoman CSS -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css"
+    />
+
+    <!-- Tailwind CSS for styling UI elements -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        /* Make map container fill the screen */
+        #map {
+            height: 100vh;
+            width: 100vw;
+        }
+        /* Style for the control panel */
+        .custom-ui-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000; /* Ensure it's above the map */
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+        }
+        /* Style for permanent tooltips */
+        .leaflet-tooltip-permanent {
+            background-color: rgba(255, 255, 255, 0.8);
+            border: 1px solid #3388ff;
+            color: #333;
+            font-weight: bold;
+        }
+        /* Styles for the export modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 2000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body class="font-sans">
+
+    <!-- Map Container -->
+    <div id="map"></div>
+
+    <!-- UI Control Panel -->
+    <div class="custom-ui-panel">
+        <div class="flex flex-col space-y-2">
+            <h2 class="text-lg font-bold text-center text-gray-700">控制面板</h2>
+            <button id="import-btn" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-300">
+                导入 GeoJSON
+            </button>
+            <button id="export-btn" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded transition duration-300">
+                导出 GeoJSON
+            </button>
+        </div>
+    </div>
+    
+    <!-- Export Modal -->
+    <div id="export-modal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <h3 class="text-xl font-bold mb-4">选择要导出的图层</h3>
+            <div id="layer-list" class="space-y-2 mb-4">
+                <!-- Layer items will be injected here -->
+            </div>
+            <div class="flex justify-end space-x-2">
+                <button id="cancel-export-btn" class="bg-gray-300 hover:bg-gray-400 text-black font-bold py-2 px-4 rounded">取消</button>
+                <button id="confirm-export-btn" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded">确认导出</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden file input for import -->
+    <input type="file" id="geojson-file-input" accept=".geojson,.json" style="display: none;" />
+
+    <!-- JS Libraries -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.min.js"></script>
+    <script src='https://unpkg.com/@turf/turf@6/turf.min.js'></script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            // 1. Initialize Map
+            const map = L.map('map').setView([39.9042, 116.4074], 10);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(map);
+
+            // 2. Geoman Controls
+            map.pm.addControls({ position: 'topleft', drawCircleMarker: false });
+            map.pm.setLang('zh');
+
+            // --- NEW: Central Layer Management ---
+            let managedLayers = {}; // Key: layer._leaflet_id, Value: { name: '...', layer: L.Layer }
+
+            // Helper function to generate a random name
+            function generateRandomName() {
+                return `图层-${Math.random().toString(36).substring(2, 7)}`;
+            }
+            
+            // Helper function to add a layer to the management registry
+            function registerLayer(layer, name) {
+                const layerId = L.stamp(layer);
+                const layerName = name || generateRandomName();
+                managedLayers[layerId] = { name: layerName, layer: layer };
+                layer.bindTooltip(layerName, { permanent: true, direction: 'center', className: 'leaflet-tooltip-permanent' }).openTooltip();
+                // Ensure the layer is editable
+                if (layer.pm) {
+                    layer.pm.enable({ allowSelfIntersection: false });
+                } else {
+                    // For FeatureGroups/GeoJSON layers
+                    layer.eachLayer(l => l.pm && l.pm.enable({ allowSelfIntersection: false }));
+                }
+            }
+
+            // --- Event Listeners for Layer Management ---
+
+            // When a new shape is drawn
+            map.on('pm:create', (e) => {
+                registerLayer(e.layer);
+            });
+
+            // When a layer is removed
+            map.on('pm:remove', (e) => {
+                const layerId = L.stamp(e.layer);
+                if (managedLayers[layerId]) {
+                    delete managedLayers[layerId];
+                }
+            });
+            
+            // Advanced Cut Functionality
+            map.on('pm:cut', (e) => {
+                const originalLayer = e.originalLayer;
+                const remainingLayer = e.layer;
+                
+                // 1. Unregister the original layer
+                const originalLayerId = L.stamp(originalLayer);
+                if (managedLayers[originalLayerId]) {
+                    delete managedLayers[originalLayerId];
+                }
+
+                const originalGeoJSON = originalLayer.toGeoJSON();
+                const remainingGeoJSON = remainingLayer.toGeoJSON();
+
+                try {
+                    const cutOutGeoJSON = turf.difference(originalGeoJSON, remainingGeoJSON);
+
+                    if (cutOutGeoJSON && cutOutGeoJSON.geometry && cutOutGeoJSON.geometry.coordinates.length > 0) {
+                        // 2. Register the remaining part
+                        registerLayer(remainingLayer);
+
+                        // 3. Create and register the "cut out" part
+                        const cutOutLayer = L.geoJSON(cutOutGeoJSON, {
+                            style: { color: '#ff4500' } // Different color for the new piece
+                        }).addTo(map);
+                        registerLayer(cutOutLayer);
+                        
+                    } else {
+                        // If cut didn't produce a new piece, just re-register the remaining part
+                        registerLayer(remainingLayer);
+                    }
+                } catch (err) {
+                    console.error("Turf.js error:", err);
+                    alert("剪切计算时出错。");
+                    // Re-register the remaining layer to avoid losing it
+                    registerLayer(remainingLayer);
+                }
+            });
+
+            // --- Import & Export Logic ---
+            const importBtn = document.getElementById('import-btn');
+            const fileInput = document.getElementById('geojson-file-input');
+            const exportBtn = document.getElementById('export-btn');
+            const exportModal = document.getElementById('export-modal');
+            const layerListContainer = document.getElementById('layer-list');
+            const cancelExportBtn = document.getElementById('cancel-export-btn');
+            const confirmExportBtn = document.getElementById('confirm-export-btn');
+
+            // Import
+            importBtn.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const geojsonData = JSON.parse(e.target.result);
+                        const newLayer = L.geoJSON(geojsonData);
+                        
+                        // Register each individual layer within the imported GeoJSON
+                        newLayer.eachLayer(layer => {
+                           registerLayer(layer);
+                        });
+                        
+                        newLayer.addTo(map);
+                        if (newLayer.getBounds().isValid()) {
+                           map.fitBounds(newLayer.getBounds());
+                        }
+                        fileInput.value = '';
+                    } catch (error) {
+                        console.error('Error parsing GeoJSON:', error);
+                        alert('文件格式无效，请确保上传的是正确的 GeoJSON 文件。');
+                    }
+                };
+                reader.readAsText(file);
+            });
+
+            // Show Export Modal
+            exportBtn.addEventListener('click', () => {
+                layerListContainer.innerHTML = ''; // Clear previous list
+                const layerIds = Object.keys(managedLayers);
+
+                if (layerIds.length === 0) {
+                    alert('地图上没有可导出的图层！');
+                    return;
+                }
+
+                layerIds.forEach(id => {
+                    const item = managedLayers[id];
+                    const listItem = document.createElement('div');
+                    listItem.className = 'flex items-center';
+                    listItem.innerHTML = `
+                        <input type="checkbox" id="layer-${id}" value="${id}" class="mr-2 h-4 w-4">
+                        <label for="layer-${id}">${item.name}</label>
+                    `;
+                    layerListContainer.appendChild(listItem);
+                });
+                exportModal.classList.remove('hidden');
+            });
+
+            // Hide Export Modal
+            cancelExportBtn.addEventListener('click', () => {
+                exportModal.classList.add('hidden');
+            });
+
+            // Confirm Export and Download
+            confirmExportBtn.addEventListener('click', () => {
+                const selectedLayers = [];
+                const checkboxes = layerListContainer.querySelectorAll('input[type="checkbox"]:checked');
+                
+                if (checkboxes.length === 0) {
+                    alert('请至少选择一个图层进行导出。');
+                    return;
+                }
+
+                checkboxes.forEach(cb => {
+                    const layerId = cb.value;
+                    if(managedLayers[layerId]) {
+                        selectedLayers.push(managedLayers[layerId].layer);
+                    }
+                });
+
+                const featureGroup = L.featureGroup(selectedLayers);
+                const geojson = featureGroup.toGeoJSON();
+                const geojsonString = JSON.stringify(geojson, null, 2);
+                const blob = new Blob([geojsonString], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `export_${Date.now()}.geojson`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(a.href);
+
+                exportModal.classList.add('hidden');
+            });
+        });
+    </script>
+
+</body>
+</html>

@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Geoman + 导入导出 GeoJSON</title>
+
+  <!-- Leaflet 样式 -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Geoman 样式 -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.css" />
+
+  <style>
+    body { margin:0; padding:0; }
+    #map { height: 100vh; width: 100%; }
+    .io-bar {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 999;
+    }
+    .io-bar button {
+      margin-left: 4px;
+      padding: 6px 12px;
+      background: white;
+      border: 1px solid #ccc;
+      cursor: pointer;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <!-- 自定义按钮条 -->
+  <div class="io-bar">
+    <button id="importBtn">导入 GeoJSON</button>
+    <button id="exportBtn">导出 GeoJSON</button>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Geoman JS -->
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@latest/dist/leaflet-geoman.js"></script>
+
+  <script>
+    /* ================= 地图初始化 ================= */
+    const map = L.map('map').setView([39.9, 116.4], 10);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OSM contributors'
+    }).addTo(map);
+
+    /* 启用 Geoman 工具栏 */
+    map.pm.addControls({
+      position: 'topleft',
+      drawCircleMarker: false, // 可按需要开关
+    });
+
+    /* ================= 导入 GeoJSON ================= */
+    function readFile(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(JSON.parse(reader.result));
+        reader.onerror = reject;
+        reader.readAsText(file);
+      });
+    }
+
+    document.getElementById('importBtn').addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.geojson,application/json';
+      input.onchange = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+          const geojson = await readFile(file);
+          const layer = L.geoJSON(geojson, {
+            style: () => ({ color: '#3388ff', weight: 3 }),
+            pointToLayer: (_, latlng) => L.circleMarker(latlng, { radius: 6 })
+          }).addTo(map);
+
+          /* 让导入的图层自动可被 Geoman 编辑 */
+          layer.eachLayer(l => {
+            if (l.pm) l.pm.enable();
+          });
+
+          map.fitBounds(layer.getBounds());
+        } catch (err) {
+          alert('文件解析失败：' + err.message);
+        }
+      };
+      input.click();
+    });
+
+    /* ================= 导出 GeoJSON ================= */
+    document.getElementById('exportBtn').addEventListener('click', () => {
+      // 收集所有非临时图层
+      const layers = [];
+      map.eachLayer(layer => {
+        if (
+          layer.pm &&                // 被 Geoman 托管
+          !layer._pmTempLayer &&     // 不是临时绘制线
+          layer instanceof L.Path || // 线、面、圆等
+          layer instanceof L.Marker  // 点
+        ) {
+          layers.push(layer);
+        }
+      });
+
+      if (!layers.length) {
+        alert('请先绘制或导入数据');
+        return;
+      }
+
+      // 构造一个 GeoJSON FeatureCollection
+      const fc = {
+        type: 'FeatureCollection',
+        features: layers.map(l => l.toGeoJSON())
+      };
+
+      const blob = new Blob([JSON.stringify(fc, null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'export.geojson';
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  </script>
+</body>
+</html>
